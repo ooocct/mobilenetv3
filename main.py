@@ -24,8 +24,8 @@ from timm.utils import ModelEma
 from optim_factory import create_optimizer, LayerDecayValueAssigner
 from mobilenetv3 import MobileNetV3_Small, MobileNetV3_Large
 
-from datasets import build_dataset
-from engine import train_one_epoch, evaluate
+from datasets import build_dataset, build_Odo_dataset
+from engine import train_one_epoch, evaluate, test
 
 from utils import NativeScalerWithGradNormCount as NativeScaler
 import utils
@@ -200,8 +200,21 @@ def get_args_parser():
     return parser
 
 def main(args):
+    # TODO: Parameters setting
+    Data_frequency = 50
+    Input_dim = 6
+    args.batch_size = 2048
+    args.epochs = 1000
+    args.lr = 0.016
+    args.min_lr = 1e-10
+    # args.model_ema = True
+    # args.model_ema_eval = True
+    # args.warmup_epochs = 10
+    # args.eval = True
+
+
     utils.init_distributed_mode(args)
-    print(args)
+    # print(args)
     device = torch.device(args.device)
 
     # fix the seed for reproducibility
@@ -210,29 +223,29 @@ def main(args):
     np.random.seed(seed)
     cudnn.benchmark = True
 
-    dataset_train, args.nb_classes = build_dataset(is_train=True, args=args)
-    if args.disable_eval:
-        args.dist_eval = False
-        dataset_val = None
-    else:
-        dataset_val, _ = build_dataset(is_train=False, args=args)
+    # dataset_train, args.nb_classes = build_dataset(is_train=True, args=args)
+    # if args.disable_eval:
+    #     args.dist_eval = False
+    #     dataset_val = None
+    # else:
+    #     dataset_val, _ = build_dataset(is_train=False, args=args)
 
-    num_tasks = utils.get_world_size()
+    # num_tasks = utils.get_world_size()
     global_rank = utils.get_rank()
 
-    sampler_train = torch.utils.data.DistributedSampler(
-        dataset_train, num_replicas=num_tasks, rank=global_rank, shuffle=True, seed=args.seed,
-    )
-    print("Sampler_train = %s" % str(sampler_train))
-    if args.dist_eval:
-        if len(dataset_val) % num_tasks != 0:
-            print('Warning: Enabling distributed evaluation with an eval dataset not divisible by process number. '
-                    'This will slightly alter validation results as extra duplicate entries are added to achieve '
-                    'equal num of samples per-process.')
-        sampler_val = torch.utils.data.DistributedSampler(
-            dataset_val, num_replicas=num_tasks, rank=global_rank, shuffle=False)
-    else:
-        sampler_val = torch.utils.data.SequentialSampler(dataset_val)
+    # sampler_train = torch.utils.data.DistributedSampler(
+    #     dataset_train, num_replicas=num_tasks, rank=global_rank, shuffle=True, seed=args.seed,
+    # )
+    # print("Sampler_train = %s" % str(sampler_train))
+    # if args.dist_eval:
+    #     if len(dataset_val) % num_tasks != 0:
+    #         print('Warning: Enabling distributed evaluation with an eval dataset not divisible by process number. '
+    #                 'This will slightly alter validation results as extra duplicate entries are added to achieve '
+    #                 'equal num of samples per-process.')
+    #     sampler_val = torch.utils.data.DistributedSampler(
+    #         dataset_val, num_replicas=num_tasks, rank=global_rank, shuffle=False)
+    # else:
+    #     sampler_val = torch.utils.data.SequentialSampler(dataset_val)
 
     log_writer = None
 
@@ -241,61 +254,82 @@ def main(args):
     else:
         wandb_logger = None
 
+    # data_loader_train = torch.utils.data.DataLoader(
+    #     dataset_train, sampler=sampler_train,
+    #     batch_size=args.batch_size,
+    #     num_workers=args.num_workers,
+    #     pin_memory=args.pin_mem,
+    #     drop_last=True,
+    # )
+    #
+    # if dataset_val is not None:
+    #     data_loader_val = torch.utils.data.DataLoader(
+    #         dataset_val, sampler=sampler_val,
+    #         batch_size=125,
+    #         num_workers=args.num_workers,
+    #         pin_memory=args.pin_mem,
+    #         drop_last=False
+    #     )
+    # else:
+    #     data_loader_val = None
+
+    # TODO: load our Data
+
+    full_dataset,test_dataset,train_size,val_size,max_out,min_out = build_Odo_dataset(Data_frequency,Input_dim,device)
+    dataset_train, dataset_val = torch.utils.data.random_split(full_dataset, [train_size, val_size])
     data_loader_train = torch.utils.data.DataLoader(
-        dataset_train, sampler=sampler_train,
+        # 从dataset数据库中每次抽出batch_size个数据
+        dataset=dataset_train,
         batch_size=args.batch_size,
-        num_workers=args.num_workers,
-        pin_memory=args.pin_mem,
-        drop_last=True,
+        shuffle=True,  # 将数据打乱
+        # sampler=sampler,
+        num_workers=0,  # 使用两个线程
+    )
+    data_loader_val = torch.utils.data.DataLoader(
+        # 从dataset数据库中每次抽出batch_size个数据
+        dataset=dataset_val,
+        batch_size=args.batch_size,
+        shuffle=True,  # 将数据打乱
+        # sampler=sampler,
+        num_workers=0,  # 使用两个线程
     )
 
-    if dataset_val is not None:
-        data_loader_val = torch.utils.data.DataLoader(
-            dataset_val, sampler=sampler_val,
-            batch_size=125,
-            num_workers=args.num_workers,
-            pin_memory=args.pin_mem,
-            drop_last=False
-        )
-    else:
-        data_loader_val = None
-
     mixup_fn = None
-    mixup_active = args.mixup > 0 or args.cutmix > 0. or args.cutmix_minmax is not None
-    if mixup_active:
-        print("Mixup is activated!")
-        mixup_fn = Mixup(
-            mixup_alpha=args.mixup, cutmix_alpha=args.cutmix, cutmix_minmax=args.cutmix_minmax,
-            prob=args.mixup_prob, switch_prob=args.mixup_switch_prob, mode=args.mixup_mode,
-            label_smoothing=args.smoothing, num_classes=args.nb_classes)
+    # mixup_active = args.mixup > 0 or args.cutmix > 0. or args.cutmix_minmax is not None
+    # if mixup_active:
+    #     print("Mixup is activated!")
+    #     mixup_fn = Mixup(
+    #         mixup_alpha=args.mixup, cutmix_alpha=args.cutmix, cutmix_minmax=args.cutmix_minmax,
+    #         prob=args.mixup_prob, switch_prob=args.mixup_switch_prob, mode=args.mixup_mode,
+    #         label_smoothing=args.smoothing, num_classes=args.nb_classes)
 
-    if args.model == "mobilenet_v3_small":
-        model = MobileNetV3_Small()
-    elif args.model == "mobilenet_v3_large":
-        model = MobileNetV3_Large()
-
-    if args.finetune:
-        if args.finetune.startswith('https'):
-            checkpoint = torch.hub.load_state_dict_from_url(
-                args.finetune, map_location='cpu', check_hash=True)
-        else:
-            checkpoint = torch.load(args.finetune, map_location='cpu')
-
-        print("Load ckpt from %s" % args.finetune)
-        checkpoint_model = None
-        for model_key in args.model_key.split('|'):
-            if model_key in checkpoint:
-                checkpoint_model = checkpoint[model_key]
-                print("Load state_dict by model_key = %s" % model_key)
-                break
-        if checkpoint_model is None:
-            checkpoint_model = checkpoint
-        state_dict = model.state_dict()
-        for k in ['head.weight', 'head.bias']:
-            if k in checkpoint_model and checkpoint_model[k].shape != state_dict[k].shape:
-                print(f"Removing key {k} from pretrained checkpoint")
-                del checkpoint_model[k]
-        utils.load_state_dict(model, checkpoint_model, prefix=args.model_prefix)
+    # if args.model == "mobilenet_v3_small":
+    #     model = MobileNetV3_Small()
+    # elif args.model == "mobilenet_v3_large":
+    # model = MobileNetV3_Large()
+    model = MobileNetV3_Small()
+    # if args.finetune:
+    #     if args.finetune.startswith('https'):
+    #         checkpoint = torch.hub.load_state_dict_from_url(
+    #             args.finetune, map_location='cpu', check_hash=True)
+    #     else:
+    #         checkpoint = torch.load(args.finetune, map_location='cpu')
+    #
+    #     print("Load ckpt from %s" % args.finetune)
+    #     checkpoint_model = None
+    #     for model_key in args.model_key.split('|'):
+    #         if model_key in checkpoint:
+    #             checkpoint_model = checkpoint[model_key]
+    #             print("Load state_dict by model_key = %s" % model_key)
+    #             break
+    #     if checkpoint_model is None:
+    #         checkpoint_model = checkpoint
+    #     state_dict = model.state_dict()
+    #     for k in ['head.weight', 'head.bias']:
+    #         if k in checkpoint_model and checkpoint_model[k].shape != state_dict[k].shape:
+    #             print(f"Removing key {k} from pretrained checkpoint")
+    #             del checkpoint_model[k]
+    #     utils.load_state_dict(model, checkpoint_model, prefix=args.model_prefix)
     model.to(device)
 
     model_ema = None
@@ -314,7 +348,7 @@ def main(args):
     print("Model = %s" % str(model_without_ddp))
     print('number of params:', n_parameters)
 
-    total_batch_size = args.batch_size * args.update_freq * utils.get_world_size()
+    total_batch_size = args.batch_size # args.batch_size * args.update_freq * utils.get_world_size()
     num_training_steps_per_epoch = len(dataset_train) // total_batch_size
     print("LR = %.8f" % args.lr)
     print("Batch size = %d" % total_batch_size)
@@ -339,7 +373,7 @@ def main(args):
 
     optimizer = create_optimizer(
         args, model_without_ddp, skip_list=None,
-        get_num_layer=assigner.get_layer_id if assigner is not None else None, 
+        get_num_layer=assigner.get_layer_id if assigner is not None else None,
         get_layer_scale=assigner.get_scale if assigner is not None else None)
 
     loss_scaler = NativeScaler() # if args.use_amp is False, this won't be used
@@ -372,7 +406,17 @@ def main(args):
 
     if args.eval:
         print(f"Eval only mode")
-        test_stats = evaluate(data_loader_val, model, device, use_amp=args.use_amp)
+        data_loader_test = torch.utils.data.DataLoader(
+            # 从dataset数据库中每次抽出batch_size个数据
+            dataset=test_dataset,
+            batch_size=1,
+            # shuffle=True,  # 将数据打乱
+            # sampler=sampler,
+            num_workers=0,  # 使用两个线程
+        )
+        model.load_state_dict(
+            torch.load('{}/odo20220426272829_3d_SMV3_2s_batch2048Drop081e10_16e3.pth'.format('.'), map_location=lambda storage, loc: storage))
+        test_stats = test(data_loader_test, model, device, max_out, min_out, use_amp=args.use_amp)
         print(f"Accuracy of the network on {len(dataset_val)} test images: {test_stats['acc1']:.5f}%")
         return
 
@@ -441,6 +485,7 @@ def main(args):
             log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
                          'epoch': epoch,
                          'n_parameters': n_parameters}
+        torch.save(model.state_dict(), '{}/odo20220426272829_3d_SMV3_2s_batch2048Drop081e10_16e3.pth'.format('.'))
 
         if args.output_dir and utils.is_main_process():
             if log_writer is not None:

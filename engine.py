@@ -14,6 +14,10 @@ from timm.utils import accuracy, ModelEma
 
 import utils
 
+import numpy as np
+import pandas as pd
+
+
 def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     data_loader: Iterable, optimizer: torch.optim.Optimizer,
                     device: torch.device, epoch: int, loss_scaler, max_norm: float = 0,
@@ -22,13 +26,13 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     num_training_steps_per_epoch=None, update_freq=None, use_amp=False):
     model.train(True)
     metric_logger = utils.MetricLogger(delimiter="  ")
-    metric_logger.add_meter('lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
-    metric_logger.add_meter('min_lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
+    metric_logger.add_meter('lr', utils.SmoothedValue(window_size=1, fmt='{value:.9f}'))
+    metric_logger.add_meter('min_lr', utils.SmoothedValue(window_size=1, fmt='{value:.9f}'))
     header = 'Epoch: [{}]'.format(epoch)
     print_freq = 200
 
     optimizer.zero_grad()
-
+    criterion = torch.nn.MSELoss()
     for data_iter_step, (samples, targets) in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
         step = data_iter_step // update_freq
         if step >= num_training_steps_per_epoch:
@@ -52,13 +56,13 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
             with torch.cuda.amp.autocast():
                 output = model(samples)
                 loss = criterion(output, targets)
-        else: # full precision
+        else:  # full precision
             output = model(samples)
             loss = criterion(output, targets)
 
         loss_value = loss.item()
 
-        if not math.isfinite(loss_value): # this could trigger if using AMP
+        if not math.isfinite(loss_value):  # this could trigger if using AMP
             print("Loss is {}, stopping training".format(loss_value))
             assert math.isfinite(loss_value)
 
@@ -73,7 +77,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                 optimizer.zero_grad()
                 if model_ema is not None:
                     model_ema.update(model)
-        else: # full precision
+        else:  # full precision
             loss /= update_freq
             loss.backward()
             if (data_iter_step + 1) % update_freq == 0:
@@ -127,16 +131,17 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
             if use_amp:
                 wandb_logger._wandb.log({'Rank-0 Batch Wise/train_grad_norm': grad_norm}, commit=False)
             wandb_logger._wandb.log({'Rank-0 Batch Wise/global_train_step': it})
-            
 
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
     print("Averaged stats:", metric_logger)
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
 
+
 @torch.no_grad()
 def evaluate(data_loader, model, device, use_amp=False):
-    criterion = torch.nn.CrossEntropyLoss()
+    # criterion = torch.nn.CrossEntropyLoss()
+    criterion = torch.nn.MSELoss()
 
     metric_logger = utils.MetricLogger(delimiter="  ")
     header = 'Test:'
@@ -169,5 +174,57 @@ def evaluate(data_loader, model, device, use_amp=False):
     metric_logger.synchronize_between_processes()
     print('* Acc@1 {top1.global_avg:.3f} Acc@5 {top5.global_avg:.3f} loss {losses.global_avg:.3f}'
           .format(top1=metric_logger.acc1, top5=metric_logger.acc5, losses=metric_logger.loss))
+
+    return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
+
+
+@torch.no_grad()
+def test(data_loader, model, device, max_out, min_out, use_amp=False):
+    # criterion = torch.nn.CrossEntropyLoss()
+    criterion = torch.nn.MSELoss()
+
+    metric_logger = utils.MetricLogger(delimiter="  ")
+    header = 'Test:'
+
+    # switch to evaluation mode
+    model.eval()
+    actual, predicted = [], []
+    for batch in metric_logger.log_every(data_loader, 10, header):
+        images = batch[0]
+        target = batch[-1]
+
+        images = images.to(device, non_blocking=True)
+        target = target.to(device, non_blocking=True)
+
+        # compute output
+        if use_amp:
+            with torch.cuda.amp.autocast():
+                output = model(images)
+                loss = criterion(output, target)
+        else:
+            output = model(images)
+            loss = criterion(output, target)
+
+        acc1, acc5 = accuracy(output, target, topk=(1, 5))
+
+        batch_size = images.shape[0]
+        metric_logger.update(loss=loss.item())
+        metric_logger.meters['acc1'].update(acc1.item(), n=batch_size)
+        metric_logger.meters['acc5'].update(acc5.item(), n=batch_size)
+
+        actual += target.data.cpu().numpy().tolist()
+        predicted += output.data.cpu().numpy().tolist()
+    # gather the stats from all processes
+    metric_logger.synchronize_between_processes()
+    print('* Acc@1 {top1.global_avg:.3f} Acc@5 {top5.global_avg:.3f} loss {losses.global_avg:.3f}'
+          .format(top1=metric_logger.acc1, top5=metric_logger.acc5, losses=metric_logger.loss))
+
+    df_result_1 = pd.DataFrame(np.c_[np.array(actual), np.array(predicted)] * (max_out - min_out) + min_out)
+    Error = abs(df_result_1.iloc[:, 1] - df_result_1.iloc[:, 0])
+    print("Error %.4f" % (Error.sum() / Error.size))
+
+    from matplotlib import pyplot as plt
+    df_result_1.iloc[:, [0, 1]].plot(figsize=(14, 7))
+    plt.show()
 
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}

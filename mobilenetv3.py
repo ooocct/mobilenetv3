@@ -93,9 +93,9 @@ class Block(nn.Module):
 
 
 class MobileNetV3_Small(nn.Module):
-    def __init__(self, num_classes=1000, act=nn.Hardswish):
+    def __init__(self, num_classes=1, act=nn.Hardswish):
         super(MobileNetV3_Small, self).__init__()
-        self.conv1 = nn.Conv2d(3, 16, kernel_size=3, stride=2, padding=1, bias=False)
+        self.conv1 = nn.Conv2d(1, 16, kernel_size=3, stride=2, padding=1, bias=False)
         self.bn1 = nn.BatchNorm2d(16)
         self.hs1 = act(inplace=True)
 
@@ -122,7 +122,7 @@ class MobileNetV3_Small(nn.Module):
         self.linear3 = nn.Linear(576, 1280, bias=False)
         self.bn3 = nn.BatchNorm1d(1280)
         self.hs3 = act(inplace=True)
-        self.drop = nn.Dropout(0.2)
+        self.drop = nn.Dropout(0.8)
         self.linear4 = nn.Linear(1280, num_classes)
         self.init_params()
 
@@ -152,9 +152,9 @@ class MobileNetV3_Small(nn.Module):
 
 
 class MobileNetV3_Large(nn.Module):
-    def __init__(self, num_classes=1000, act=nn.Hardswish):
+    def __init__(self, num_classes=1, act=nn.Hardswish):
         super(MobileNetV3_Large, self).__init__()
-        self.conv1 = nn.Conv2d(3, 16, kernel_size=3, stride=2, padding=1, bias=False)
+        self.conv1 = nn.Conv2d(1, 16, kernel_size=3, stride=2, padding=1, bias=False)
         self.bn1 = nn.BatchNorm2d(16)
         self.hs1 = act(inplace=True)
 
@@ -185,7 +185,7 @@ class MobileNetV3_Large(nn.Module):
         self.linear3 = nn.Linear(960, 1280, bias=False)
         self.bn3 = nn.BatchNorm1d(1280)
         self.hs3 = act(inplace=True)
-        self.drop = nn.Dropout(0.2)
+        self.drop = nn.Dropout(0.8)
 
         self.linear4 = nn.Linear(1280, num_classes)
         self.init_params()
@@ -205,11 +205,14 @@ class MobileNetV3_Large(nn.Module):
                     init.constant_(m.bias, 0)
 
     def forward(self, x):
+        # out = self.conv1(x)
+        # out = self.bn1(out)
+        # out = self.hs1(out)
         out = self.hs1(self.bn1(self.conv1(x)))
         out = self.bneck(out)
 
         out = self.hs2(self.bn2(self.conv2(out)))
         out = self.gap(out).flatten(1)
         out = self.drop(self.hs3(self.bn3(self.linear3(out))))
-        
-        return self.linear4(out)
+        out = self.linear4(out)
+        return out

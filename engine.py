@@ -11,6 +11,7 @@ from typing import Iterable, Optional
 import torch
 from timm.data import Mixup
 from timm.utils import accuracy, ModelEma
+from torch.utils.mobile_optimizer import optimize_for_mobile
 
 import utils
 
@@ -195,6 +196,11 @@ def test(data_loader, model, device, max_out, min_out, use_amp=False):
 
         images = images.to(device, non_blocking=True)
         target = target.to(device, non_blocking=True)
+
+        # cpu_model_1 = model.cpu()
+        # save_model_1 = torch.jit.trace(cpu_model_1, images)
+        # save_model_1_optimized = optimize_for_mobile(save_model_1)
+        # save_model_1_optimized._save_for_lite_interpreter("Modelcpu.ptl")
 
         # compute output
         if use_amp:
